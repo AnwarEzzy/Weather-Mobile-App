@@ -1,3 +1,4 @@
+import * as Location from 'expo-location';
 import {
   View,
   Text,
@@ -6,11 +7,13 @@ import {
   TextInput,
   TouchableOpacity,
   ScrollView,
+  Alert
 } from "react-native";
-import React, { useCallback, useEffect, useState } from "react";
+import { useNavigation, useRoute } from "@react-navigation/native";
+import React, { useCallback, useEffect, useState, useContext } from "react";
 import { StatusBar } from "expo-status-bar";
 import { theme } from "../theme";
-import { MagnifyingGlassIcon as SearchIcon } from "react-native-heroicons/outline";
+import { MagnifyingGlassIcon as SearchIcon, UserIcon, ListBulletIcon, CalendarDaysIcon } from "react-native-heroicons/outline";
 import { MapPinIcon as MapIcon } from "react-native-heroicons/solid";
 import { Feather } from "@expo/vector-icons";
 import { Entypo } from "@expo/vector-icons";
@@ -19,11 +22,73 @@ import { debounce } from "lodash";
 import { fetchLocations, fetchWeatherForecast } from "../api/weather";
 import { weatherImages } from "../constants";
 import * as Progress from "react-native-progress";
+import { AuthContext } from "../context/AuthContext";
+import { addSearchHistory, getMostSearchedCity, addFavorite, removeFavorite, getFavorites } from "../db/database";
+import { StarIcon } from "react-native-heroicons/solid";
+import { ArrowRightOnRectangleIcon as LogoutIcon } from "react-native-heroicons/outline"; // Logout Icon
+
 export default function HomeScreen() {
+  const { user, logout } = useContext(AuthContext);
+  const navigation = useNavigation();
+  const route = useRoute();
   const [showSearchBar, setShowSearchBar] = useState(false);
   const [locations, setLocations] = useState([]);
   const [weather, setWeather] = useState({});
+  const [nearbyWeather, setNearbyWeather] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [isFavorite, setIsFavorite] = useState(false);
+
+  // Get User Location for "Nearby Weather"
+  useEffect(() => {
+    (async () => {
+      let { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') {
+        // Alert.alert('Permission to access location was denied');
+        return;
+      }
+
+      let location = await Location.getCurrentPositionAsync({});
+      if (location && location.coords) {
+        const { latitude, longitude } = location.coords;
+        fetchWeatherForecast({
+          cityName: `${latitude},${longitude}`,
+          days: '1'
+        }).then(data => {
+          setNearbyWeather(data);
+        });
+      }
+    })();
+  }, []);
+
+  // Load Recommendation and Favorites on mount (or user change)
+  useEffect(() => {
+    if (user) {
+      getMostSearchedCity(user.id).then(rec => {
+        if (rec) {
+          // Initial toast/alert
+          console.log("Recommended City:", rec.city_name);
+        }
+      });
+    }
+  }, [user]);
+
+  const toggleFavorite = async () => {
+    if (!user) return;
+    if (isFavorite) {
+      await removeFavorite(user.id, location?.name);
+      setIsFavorite(false);
+    } else {
+      await addFavorite(user.id, location?.name);
+      setIsFavorite(true);
+    }
+  };
+
+  const checkIfFavorite = async (cityName) => {
+    if (!user) return;
+    const favs = await getFavorites(user.id);
+    const exists = favs.find(f => f.city_name === cityName);
+    setIsFavorite(!!exists);
+  };
 
   const handelLocation = (loc) => {
     console.log(locations);
@@ -37,6 +102,10 @@ export default function HomeScreen() {
       setWeather(data);
       setLoading(false);
       console.log(data);
+      if (user) {
+        addSearchHistory(user.id, loc.name);
+        checkIfFavorite(loc.name);
+      }
     });
   };
 
@@ -47,12 +116,36 @@ export default function HomeScreen() {
   };
 
   useEffect(() => {
-    fetchMyWeatherData();
-  }, []);
+    // If passed a specific city via navigation (e.g. from Favorites), load it
+    if (route.params?.city) {
+      fetchWeatherForecast({ cityName: route.params.city, days: "7" }).then(data => {
+        setWeather(data);
+        setLoading(false);
+        if (user) checkIfFavorite(route.params.city);
+      });
+    } else {
+      fetchMyWeatherData();
+    }
+  }, [user, route.params]); // Depend on route.params to trigger when coming back
+
   const fetchMyWeatherData = async () => {
-    fetchWeatherForecast({ cityName: "Casablanca", days: "7" }).then((data) => {
+    // ... existing logic ...
+    let cityName = "Casablanca";
+    if (user) {
+      const rec = await getMostSearchedCity(user.id);
+      if (rec) {
+        cityName = rec.city_name;
+        // Alert (optional, maybe annoying on every mount)
+        // Alert.alert("Welcome Back", `Loading your favorite city: ${cityName}`);
+      }
+    }
+
+    fetchWeatherForecast({ cityName, days: "7" }).then((data) => {
       setWeather(data);
       setLoading(false);
+      if (user) {
+        checkIfFavorite(cityName);
+      }
     });
   };
   const handleDebounce = useCallback(debounce(handleSearch, 1000), []);
@@ -77,7 +170,7 @@ export default function HomeScreen() {
         <SafeAreaView className="flex flex-1">
           {/* SEARCH BAR SECTION */}
 
-          <View className=" mx-4 relative z-50">
+          <View className=" mx-4 relative z-50 mt-12">
             <View
               className={"flex-row justify-end items-center rounded-full " + (showSearchBar ? "mb-12" : "")}
               style={{
@@ -91,7 +184,7 @@ export default function HomeScreen() {
                   onChangeText={handleDebounce}
                   placeholder="Search City"
                   placeholderTextColor={"white"}
-                  className="h-12 pl-4 text-xl pb-1 flex-1"
+                  className="h-12 pl-4 text-xl pb-1 flex-1 text-white"
                 />
               ) : null}
 
@@ -133,25 +226,102 @@ export default function HomeScreen() {
           {/* FORCAST SECTION */}
 
           <View className="flex-1 flex justify-around mx-4 mb-2">
-            <View className="flex-row items-center justify-center">
-              <TouchableOpacity
-                onPress={() => setShowSearchBar(!showSearchBar)}
-                style={{ backgroundColor: theme.bgWhite(0.3) }}
-                className="p-3 rounded-full m-1 mr-4"
-              >
-                <SearchIcon size={25} color="white" />
-              </TouchableOpacity>
-              <Text className="text-white text-3xl font-bold items-center justify-center">
-                {location?.name},
-              </Text>
-              <Text className="text-lg text-white font-semibold items-center justify-center">
-                {" " + location?.country}
-              </Text>
+
+            {/* Header Row: Icons Left, Location Center */}
+            <View className="flex-row items-center justify-between mb-4">
+              {/* Left Side: Buttons */}
+              <View className="flex-row">
+                <TouchableOpacity
+                  onPress={() => setShowSearchBar(!showSearchBar)}
+                  style={{ backgroundColor: theme.bgWhite(0.3) }}
+                  className="p-3 rounded-full mr-2"
+                >
+                  <SearchIcon size={20} color="white" />
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  onPress={() => navigation.navigate('Favorites')}
+                  style={{ backgroundColor: theme.bgWhite(0.3) }}
+                  className="p-3 rounded-full mr-2"
+                >
+                  <ListBulletIcon size={20} color="white" />
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  onPress={async () => {
+                    setLoading(true);
+                    try {
+                      let { status } = await Location.requestForegroundPermissionsAsync();
+                      if (status !== 'granted') {
+                        setLoading(false);
+                        Alert.alert("Permission denied", "We need location permission to find your city.");
+                        return;
+                      }
+
+                      let location = await Location.getCurrentPositionAsync({});
+                      if (location?.coords) {
+                        const { latitude, longitude } = location.coords;
+                        const data = await fetchWeatherForecast({
+                          cityName: `${latitude},${longitude}`,
+                          days: '7'
+                        });
+                        setWeather(data);
+                        setNearbyWeather(data);
+                      }
+                    } catch (error) {
+                      console.log("GPS Error: ", error);
+                      Alert.alert("Error", "Could not fetch location. Please ensure location services are enabled.");
+                    } finally {
+                      setLoading(false);
+                    }
+                  }}
+                  style={{ backgroundColor: theme.bgWhite(0.3) }}
+                  className="p-3 rounded-full mr-2"
+                >
+                  <MapIcon size={20} color="white" />
+                </TouchableOpacity>
+              </View>
+
+              {/* Center: Location Name */}
+              <View className="flex-1 justify-center items-center">
+                <Text className="text-white text-2xl font-bold text-center">
+                  {location?.name}
+                </Text>
+                <Text className="text-sm text-gray-200 font-semibold text-center">
+                  {location?.country}
+                </Text>
+              </View>
+
+              {/* Right Side: Buttons */}
+              <View className="flex-row">
+                <TouchableOpacity
+                  onPress={toggleFavorite}
+                  className="mr-2 p-3"
+                >
+                  <StarIcon size={25} color={isFavorite ? "yellow" : "white"} />
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  onPress={() => navigation.navigate('Profile')}
+                  style={{ backgroundColor: theme.bgWhite(0.3) }}
+                  className="p-3 rounded-full mr-2"
+                >
+                  <UserIcon size={20} color="white" />
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  onPress={logout}
+                  style={{ backgroundColor: theme.bgWhite(0.3) }}
+                  className="p-3 rounded-full"
+                >
+                  <LogoutIcon size={20} color="white" />
+                </TouchableOpacity>
+              </View>
             </View>
             {/* IMAGE VIEW */}
             <View className="justify-center flex-row">
               <Image
-                source={weatherImages[current?.condition?.text]}
+                source={weatherImages[current?.condition?.text] || weatherImages['other']}
                 className="w-52 h-52"
               />
             </View>
@@ -207,7 +377,7 @@ export default function HomeScreen() {
                       style={{ backgroundColor: theme.bgWhite(0.3) }}
                     >
                       <Image
-                        source={weatherImages[days?.day?.condition?.text]}
+                        source={weatherImages[days?.day?.condition?.text] || weatherImages['other']}
                         className="w-12 h-12 ml-5"
                       />
                       <Text className="text-slate-300 font-semibold text-center py-1">
@@ -221,6 +391,35 @@ export default function HomeScreen() {
                 })}
               </ScrollView>
             </View>
+
+            {/* Nearby/GPS Location Section */}
+            {nearbyWeather && (
+              <View className="mb-8 space-y-3">
+                <View className="flex-row items-center mx-5 space-x-2">
+                  <MapIcon size={22} color="white" />
+                  <Text className="text-white text-base">Weather Near You</Text>
+                </View>
+                <TouchableOpacity
+                  className="mx-5 rounded-3xl p-4 flex-row justify-between items-center"
+                  style={{ backgroundColor: theme.bgWhite(0.15) }}
+                  onPress={() => setWeather(nearbyWeather)}
+                >
+                  <View className="flex-row items-center space-x-4">
+                    <Image
+                      source={weatherImages[nearbyWeather?.current?.condition?.text] || weatherImages['other']}
+                      className="h-16 w-16"
+                    />
+                    <View>
+                      <Text className="text-white text-xl font-bold">{nearbyWeather?.location?.name}</Text>
+                      <Text className="text-gray-200">{nearbyWeather?.current?.condition?.text}</Text>
+                    </View>
+                  </View>
+                  <Text className="text-white text-3xl font-semibold">
+                    {nearbyWeather?.current?.temp_c}&#176;
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            )}
           </View>
         </SafeAreaView>
       )}
